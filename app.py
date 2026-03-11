@@ -225,7 +225,7 @@ if unidade == "Brasil":
                 col_inp, col_btn = st.columns([3, 1])
                 with col_inp:
                     novo_modelo = st.text_input("m", label_visibility="collapsed",
-                                                placeholder="Nome do modelo (ex: M5-224)").strip()
+                                                placeholder="Nome do modelo (ex: M5-214Ai)").strip()
                 with col_btn:
                     if st.form_submit_button("➕ Inserir", use_container_width=True) and novo_modelo:
                         try:
@@ -427,7 +427,7 @@ if unidade == "Brasil":
                         seriais_bloco = st.text_area(
                             f"Seriais do modelo acima (um por linha)",
                             height=120,
-                            placeholder="Ex:\n2600101\n2600102",
+                            placeholder="Ex:\nCHBR2600101\nCHBR2600102",
                             key=f"seriais_bloco_{i}"
                         )
                         st.markdown('</div>', unsafe_allow_html=True)
@@ -691,4 +691,5 @@ else:
     2. **Bancada de Aferição** — Importe os dados técnicos de calibração via planilha
     3. **Consulta** — Pesquise qualquer balança por serial, lote, DI ou cliente
     4. **Dashboard** — Acompanhe o status geral do inventário
+
     """)
