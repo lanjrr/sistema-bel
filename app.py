@@ -10,7 +10,10 @@ from openpyxl.styles import Font, PatternFill, Alignment
 # BANCO DE DADOS — SUPABASE / POSTGRESQL
 # ══════════════════════════════════════════════
 def get_conn():
-    return psycopg2.connect(st.secrets["DATABASE_URL"], sslmode='require')
+    url = st.secrets["DATABASE_URL"]
+    if "sslmode" not in url:
+        url += "?sslmode=require"
+    return psycopg2.connect(url)
 
 def init_db():
     conn = get_conn()
