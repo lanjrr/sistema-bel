@@ -27,10 +27,24 @@ def init_db():
                   pedido TEXT, valor_antes TEXT, valor_depois TEXT,
                   exc_se TEXT, exc_sd TEXT, exc_ie TEXT, exc_id TEXT,
                   carga_maxima TEXT, zero TEXT, status TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS acessos
+                 (id SERIAL PRIMARY KEY,
+                  ip TEXT, pagina TEXT,
+                  acessado_em TIMESTAMP DEFAULT NOW())''')
     conn.commit()
     conn.close()
 
 init_db()
+
+def registrar_acesso(pagina: str):
+    """Registra IP e página acessada. Executado uma vez por sessão/página."""
+    try:
+        ip = st.context.headers.get("X-Forwarded-For", "desconhecido")
+        if "," in ip:
+            ip = ip.split(",")[0].strip()
+        execute("INSERT INTO acessos (ip, pagina) VALUES (%s, %s)", (ip, pagina))
+    except Exception:
+        pass  # Nunca deixar o log travar o app
 
 def query_df(sql, params=None):
     """Executa SELECT e retorna DataFrame."""
@@ -183,6 +197,7 @@ if unidade == "Brasil":
     # DASHBOARD
     # ══════════════════════════════════════════
     if menu == "📊 Dashboard":
+        registrar_acesso("Dashboard")
         st.title("📊 Dashboard — Visão Geral")
 
         df_all = query_df("SELECT status, modelo, di FROM producao")
@@ -232,6 +247,7 @@ if unidade == "Brasil":
     # GESTÃO DE CADASTROS
     # ══════════════════════════════════════════
     elif menu == "📋 Gestão de Cadastros":
+        registrar_acesso("Gestão de Cadastros")
         st.title("📋 Gestão de Cadastros")
 
         tab_modelos, tab_clientes, tab_dis = st.tabs([
@@ -460,6 +476,7 @@ if unidade == "Brasil":
     # BANCADA DE AFERIÇÃO
     # ══════════════════════════════════════════
     elif menu == "🔬 Bancada de Aferição":
+        registrar_acesso("Bancada de Aferição")
         st.title("🔬 Bancada de Calibração")
 
         lista_clientes = query_df("SELECT nome FROM clientes ORDER BY nome")['nome'].tolist()
@@ -577,6 +594,7 @@ if unidade == "Brasil":
     # PRONTA ENTREGA
     # ══════════════════════════════════════════
     elif menu == "📦 Pronta Entrega":
+        registrar_acesso("Pronta Entrega")
         st.title("📦 Pronta Entrega — Vincular Cliente")
 
         lista_clientes = query_df("SELECT nome FROM clientes ORDER BY nome")['nome'].tolist()
@@ -630,6 +648,7 @@ if unidade == "Brasil":
     # CONSULTA + DETALHE
     # ══════════════════════════════════════════
     elif menu == "🔍 Consulta":
+        registrar_acesso("Consulta")
         st.title("🔍 Consulta e Inventário Global")
 
         if 'detalhe_id' in st.session_state and st.session_state.detalhe_id:
@@ -728,7 +747,23 @@ if unidade == "Brasil":
     # CONFIGURAÇÕES
     # ══════════════════════════════════════════
     elif menu == "⚙️  Configurações":
+        registrar_acesso("Configurações")
         st.title("⚙️ Configurações do Sistema")
+
+        st.subheader("👁️ Log de Acessos")
+        df_log = query_df("""
+            SELECT acessado_em AS "Data/Hora (UTC)", ip AS "IP", pagina AS "Página"
+            FROM acessos ORDER BY acessado_em DESC LIMIT 200
+        """)
+        if df_log.empty:
+            st.info("Nenhum acesso registrado ainda.")
+        else:
+            st.markdown(f"**{len(df_log)} acesso(s) registrado(s) (últimos 200):**")
+            st.dataframe(df_log, use_container_width=True, hide_index=True)
+            st.download_button("⬇️ Exportar Log",
+                data=gerar_excel(df_log), file_name="log_acessos.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
         st.markdown("---")
         st.subheader("⚠️ Zona de Manutenção")
         st.warning("Esta ação apaga **todos os dados** permanentemente e não pode ser desfeita.")
@@ -739,6 +774,7 @@ if unidade == "Brasil":
                 c.execute("DROP TABLE IF EXISTS modelos CASCADE")
                 c.execute("DROP TABLE IF EXISTS clientes CASCADE")
                 c.execute("DROP TABLE IF EXISTS producao CASCADE")
+                c.execute("DROP TABLE IF EXISTS acessos CASCADE")
                 conn.commit(); conn.close()
                 init_db()
                 st.success("Banco de dados recriado do zero!")
