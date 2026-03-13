@@ -11,9 +11,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 # ══════════════════════════════════════════════
 def get_conn():
     url = st.secrets["DATABASE_URL"]
-    if "sslmode" not in url:
-        url += "?sslmode=require"
-    return psycopg2.connect(url)
+    return psycopg2.connect(url, sslmode="require", connect_timeout=10)
 
 def init_db():
     conn = get_conn()
