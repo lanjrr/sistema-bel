@@ -5,6 +5,12 @@ import pandas as pd
 import io
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 # ══════════════════════════════════════════════
 # BANCO DE DADOS — SUPABASE / POSTGRESQL
@@ -22,38 +28,31 @@ def init_db():
                  (id SERIAL PRIMARY KEY, nome TEXT UNIQUE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS producao
                  (id SERIAL PRIMARY KEY,
-                  di TEXT, modelo TEXT, cliente TEXT,
+                  di TEXT, modelo TEXT, modelo_original TEXT, cliente TEXT,
                   serial_china TEXT UNIQUE, serial_brasil TEXT,
                   pedido TEXT, valor_antes TEXT, valor_depois TEXT,
                   exc_se TEXT, exc_sd TEXT, exc_ie TEXT, exc_id TEXT,
-                  carga_maxima TEXT, zero TEXT, status TEXT)''')
+                  carga_maxima TEXT, zero TEXT, numero_lacre TEXT,
+                  status TEXT)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-
 def query_df(sql, params=None):
-    """Executa SELECT e retorna DataFrame."""
     conn = get_conn()
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
     return df
 
 def execute(sql, params=None):
-    """Executa INSERT/UPDATE/DELETE."""
     conn = get_conn()
     c = conn.cursor()
     c.execute(sql, params or ())
     conn.commit()
     conn.close()
 
-def executemany_safe(rows_sql, rows_data):
-    """
-    Executa múltiplos INSERTs retornando (ok, duplicados).
-    rows_sql: string SQL com %s
-    rows_data: lista de tuplas
-    """
+def executemany_safe(rows_sql, rows_data, serial_idx=3):
     conn = get_conn()
     c = conn.cursor()
     ok, dup = 0, []
@@ -64,9 +63,193 @@ def executemany_safe(rows_sql, rows_data):
             ok += 1
         except psycopg2.errors.UniqueViolation:
             conn.rollback()
-            dup.append(data[3])  # serial_china é o 4º campo
+            dup.append(data[serial_idx])
     conn.close()
     return ok, dup
+
+def parsear_seriais(texto: str) -> list:
+    """
+    Aceita seriais separados por newline, espaço, vírgula ou tabulação.
+    Retorna lista de seriais únicos não vazios.
+    """
+    import re
+    tokens = re.split(r'[\n\r,;\t ]+', texto.strip())
+    return [t.strip() for t in tokens if t.strip()]
+
+# ══════════════════════════════════════════════
+# GERAÇÃO DE PDF
+# ══════════════════════════════════════════════
+def gerar_pdf_relatorio(row) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            rightMargin=2*cm, leftMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+
+    styles = getSampleStyleSheet()
+    cor_bel = colors.HexColor('#1a1a2e')
+    cor_azul = colors.HexColor('#0066cc')
+
+    estilo_titulo = ParagraphStyle('titulo', fontSize=18, textColor=cor_bel,
+                                   fontName='Helvetica-Bold', alignment=TA_CENTER, spaceAfter=4)
+    estilo_sub = ParagraphStyle('sub', fontSize=10, textColor=colors.grey,
+                                alignment=TA_CENTER, spaceAfter=2)
+    estilo_secao = ParagraphStyle('secao', fontSize=11, textColor=cor_azul,
+                                  fontName='Helvetica-Bold', spaceBefore=14, spaceAfter=6)
+    estilo_normal = ParagraphStyle('normal', fontSize=10, textColor=cor_bel)
+
+    elementos = []
+
+    # Cabeçalho
+    elementos.append(Paragraph("BEL EQUIPAMENTOS ANALÍTICOS LTDA", estilo_titulo))
+    elementos.append(Paragraph("Rua Alferes José Caetano, 1572 — Piracicaba / SP", estilo_sub))
+    elementos.append(Paragraph("INMETRO/DIMEL nº 0008/2018", estilo_sub))
+    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(HRFlowable(width="100%", thickness=2, color=cor_bel))
+    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(Paragraph("RELATÓRIO DE AFERIÇÃO", estilo_titulo))
+    elementos.append(Spacer(1, 0.4*cm))
+
+    # Identificação da balança
+    elementos.append(Paragraph("Identificação do Equipamento", estilo_secao))
+    dados_id = [
+        ["Serial Brasil (Inmetro)", row.get('serial_brasil') or '—',
+         "Serial China (Fábrica)", row.get('serial_china') or '—'],
+        ["Modelo", row.get('modelo') or '—',
+         "Modelo Original", row.get('modelo_original') or row.get('modelo') or '—'],
+        ["DI", row.get('di') or '—',
+         "Nº do Lacre", row.get('numero_lacre') or '—'],
+    ]
+    t_id = Table(dados_id, colWidths=[4.5*cm, 5.5*cm, 4.5*cm, 5.5*cm])
+    t_id.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#f0f4ff')),
+        ('BACKGROUND', (2,0), (2,-1), colors.HexColor('#f0f4ff')),
+        ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
+        ('FONTNAME', (2,0), (2,-1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 10),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cccccc')),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('ROWBACKGROUND', (0,0), (-1,-1), [colors.white, colors.HexColor('#f8f9fa')]),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+    ]))
+    elementos.append(t_id)
+
+    # Destino comercial
+    elementos.append(Paragraph("Destino Comercial", estilo_secao))
+    dados_com = [
+        ["Cliente", row.get('cliente') or '—', "Pedido", row.get('pedido') or '—'],
+    ]
+    t_com = Table(dados_com, colWidths=[4.5*cm, 5.5*cm, 4.5*cm, 5.5*cm])
+    t_com.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#f0f4ff')),
+        ('BACKGROUND', (2,0), (2,-1), colors.HexColor('#f0f4ff')),
+        ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
+        ('FONTNAME', (2,0), (2,-1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 10),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cccccc')),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+    ]))
+    elementos.append(t_com)
+
+    # Dados de calibração
+    elementos.append(Paragraph("Dados de Calibração", estilo_secao))
+    dados_cal = [
+        ["Indicação Antes", "Indicação Depois", "Carga Máxima", "Zero"],
+        [row.get('valor_antes') or '—', row.get('valor_depois') or '—',
+         row.get('carga_maxima') or '—', row.get('zero') or '—'],
+    ]
+    t_cal = Table(dados_cal, colWidths=[5*cm, 5*cm, 5*cm, 5*cm])
+    t_cal.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), cor_bel),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 10),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cccccc')),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('TOPPADDING', (0,0), (-1,-1), 7),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 7),
+        ('BACKGROUND', (0,1), (-1,1), colors.HexColor('#f8f9fa')),
+    ]))
+    elementos.append(t_cal)
+
+    # Excentricidade
+    elementos.append(Paragraph("Teste de Excentricidade (4 cantos)", estilo_secao))
+    dados_exc = [
+        ["Sup. Esquerdo", "Sup. Direito", "Inf. Esquerdo", "Inf. Direito"],
+        [row.get('exc_se') or '—', row.get('exc_sd') or '—',
+         row.get('exc_ie') or '—', row.get('exc_id') or '—'],
+    ]
+    t_exc = Table(dados_exc, colWidths=[5*cm, 5*cm, 5*cm, 5*cm])
+    t_exc.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2d4060')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 10),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cccccc')),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('TOPPADDING', (0,0), (-1,-1), 7),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 7),
+        ('BACKGROUND', (0,1), (-1,1), colors.HexColor('#f8f9fa')),
+    ]))
+    elementos.append(t_exc)
+
+    # Rodapé
+    elementos.append(Spacer(1, 1*cm))
+    elementos.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
+    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(Paragraph(
+        "Documento gerado pelo Sistema de Rastreabilidade — Bel Equipamentos Analíticos Ltda",
+        ParagraphStyle('rodape', fontSize=8, textColor=colors.grey, alignment=TA_CENTER)))
+
+    doc.build(elementos)
+    return buf.getvalue()
+
+
+# ══════════════════════════════════════════════
+# EXCEL HELPERS
+# ══════════════════════════════════════════════
+def estilizar_excel(ws, df):
+    for i, col in enumerate(df.columns, 1):
+        max_len = max(len(str(col)),
+                      df[col].astype(str).map(len).max() if not df.empty else 0)
+        ws.column_dimensions[get_column_letter(i)].width = min(max_len + 4, 40)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1a1a2e")
+        cell.alignment = Alignment(horizontal="center")
+
+def gerar_excel(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Dados')
+        estilizar_excel(writer.sheets['Dados'], df)
+    return buf.getvalue()
+
+def gerar_planilha_afericao(df_sel: pd.DataFrame) -> bytes:
+    colunas_vazias = [
+        "Novo_Serial_Brasil", "Numero_Lacre",
+        "Valor_Antes", "Valor_Depois",
+        "Exc_Sup_Esq", "Exc_Sup_Dir", "Exc_Inf_Esq", "Exc_Inf_Dir",
+        "Carga_Max", "Zero"
+    ]
+    df_out = df_sel[["Serial_China", "Modelo", "DI"]].copy()
+    for col in colunas_vazias:
+        df_out[col] = ""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df_out.to_excel(writer, index=False, sheet_name='Calibracao')
+        ws = writer.sheets['Calibracao']
+        estilizar_excel(ws, df_out)
+        fill_pre = PatternFill("solid", fgColor="dce8f5")
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
+            for cell in row:
+                cell.fill = fill_pre
+    return buf.getvalue()
+
 
 # ══════════════════════════════════════════════
 # CONFIGURAÇÃO GERAL
@@ -103,55 +286,29 @@ st.markdown("""
     .badge-disponivel  { background:#0066cc; color:#fff; padding:4px 12px; border-radius:12px; font-size:13px; }
     .badge-pronta      { background:#7b2d8b; color:#fff; padding:4px 12px; border-radius:12px; font-size:13px; }
     .badge-finalizado  { background:#007a33; color:#fff; padding:4px 12px; border-radius:12px; font-size:13px; }
+    /* Grade de seriais */
+    .grade-serial {
+        display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0;
+    }
+    .serial-cell {
+        background: #1e2a3a; border: 1px solid #2d4060; border-radius: 4px;
+        padding: 4px 10px; font-size: 12px; color: #ffffff;
+        font-family: monospace;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════
 def color_status(val):
     if val == 'Disponível':     return 'color: #4da6ff; font-weight: bold'
     if val == 'Finalizado':     return 'color: #00cc66; font-weight: bold'
     if val == 'Pronta Entrega': return 'color: #cc88ff; font-weight: bold'
     return 'color: #ffaa44; font-weight: bold'
 
-def estilizar_excel(ws, df):
-    for i, col in enumerate(df.columns, 1):
-        max_len = max(len(str(col)),
-                      df[col].astype(str).map(len).max() if not df.empty else 0)
-        ws.column_dimensions[get_column_letter(i)].width = min(max_len + 4, 40)
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="1a1a2e")
-        cell.alignment = Alignment(horizontal="center")
-
-def gerar_excel(df: pd.DataFrame) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Dados')
-        estilizar_excel(writer.sheets['Dados'], df)
-    return buf.getvalue()
-
-def gerar_planilha_afericao(df_sel: pd.DataFrame) -> bytes:
-    colunas_vazias = [
-        "Novo_Serial_Brasil", "Valor_Antes", "Valor_Depois",
-        "Exc_Sup_Esq", "Exc_Sup_Dir", "Exc_Inf_Esq", "Exc_Inf_Dir",
-        "Carga_Max", "Zero"
-    ]
-    df_out = df_sel[["Serial_China", "Modelo", "DI"]].copy()
-    for col in colunas_vazias:
-        df_out[col] = ""
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        df_out.to_excel(writer, index=False, sheet_name='Calibracao')
-        ws = writer.sheets['Calibracao']
-        estilizar_excel(ws, df_out)
-        fill_pre = PatternFill("solid", fgColor="dce8f5")
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
-            for cell in row:
-                cell.fill = fill_pre
-    return buf.getvalue()
+def exibir_grade_seriais(seriais: list):
+    """Exibe lista de seriais em formato de grade visual."""
+    cells = "".join(f'<span class="serial-cell">{s}</span>' for s in seriais)
+    st.markdown(f'<div class="grade-serial">{cells}</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════
@@ -187,7 +344,6 @@ if unidade == "Brasil":
         st.title("📊 Dashboard — Visão Geral")
 
         df_all = query_df("SELECT status, modelo, di FROM producao")
-
         total  = len(df_all)
         disp   = len(df_all[df_all['status'] == 'Disponível'])
         pronta = len(df_all[df_all['status'] == 'Pronta Entrega'])
@@ -247,7 +403,7 @@ if unidade == "Brasil":
             with st.form("form_novo_modelo", clear_on_submit=True):
                 ci, cb = st.columns([3, 1])
                 novo_mod = ci.text_input("m", label_visibility="collapsed",
-                                          placeholder="Nome do modelo (ex: M5-224)").strip()
+                                          placeholder="Nome do modelo (ex: M214Ai)").strip()
                 if cb.form_submit_button("➕ Inserir", use_container_width=True) and novo_mod:
                     try:
                         execute("INSERT INTO modelos (nome) VALUES (%s)", (novo_mod,))
@@ -368,11 +524,10 @@ if unidade == "Brasil":
                 st.warning("Cadastre pelo menos um modelo na aba **🏷️ Modelos** antes de registrar uma DI.")
             else:
                 di_numero = st.text_input("Número da DI (ex: DI26034)", key="di_input")
-
                 st.markdown("---")
                 st.markdown("**Modelos e Seriais desta DI**")
                 st.markdown(
-                    '<div class="info-box">Uma DI pode conter múltiplos modelos. Adicione um bloco por modelo.</div>',
+                    '<div class="info-box">Adicione um bloco por modelo. Os seriais podem ser colados um por linha, separados por espaço, vírgula ou tabulação.</div>',
                     unsafe_allow_html=True)
 
                 if 'num_blocos' not in st.session_state:
@@ -385,19 +540,27 @@ if unidade == "Brasil":
                 blocos = []
                 for i in range(st.session_state.num_blocos):
                     st.markdown(f"**Modelo {i+1}**")
-                    cm, cr = st.columns([4, 1])
-                    with cm:
+                    cm_col, cr_col = st.columns([4, 1])
+                    with cm_col:
                         mod_b = st.selectbox("Modelo", lista_modelos,
                             index=None, placeholder="Selecione o modelo...",
                             key=f"mod_bloco_{i}")
-                    with cr:
+                    with cr_col:
                         st.markdown("<br>", unsafe_allow_html=True)
                         if st.session_state.num_blocos > 1:
                             if st.button("🗑️", key=f"rem_{i}"):
                                 st.session_state.num_blocos -= 1
                                 st.rerun()
-                    sn_b = st.text_area("Seriais (um por linha)", height=110,
-                        placeholder="Ex:\n2600101\n2600102", key=f"sn_bloco_{i}")
+                    sn_b = st.text_area("Seriais (um por linha, ou separados por espaço/vírgula)",
+                        height=110, key=f"sn_bloco_{i}")
+
+                    # Preview em grade
+                    if sn_b and sn_b.strip():
+                        sn_preview = parsear_seriais(sn_b)
+                        if sn_preview:
+                            st.markdown(f"**{len(sn_preview)} serial(is) detectado(s):**")
+                            exibir_grade_seriais(sn_preview)
+
                     blocos.append((mod_b, sn_b))
                     st.markdown("---")
 
@@ -410,12 +573,12 @@ if unidade == "Brasil":
                     else:
                         rows = []
                         for mod_v, sn_v in validos:
-                            for sn in [x.strip() for x in sn_v.split('\n') if x.strip()]:
+                            for sn in parsear_seriais(sn_v):
                                 rows.append((di_v, mod_v, sn, "Disponível"))
 
                         ok, dup = executemany_safe(
                             "INSERT INTO producao (di, modelo, serial_china, status) VALUES (%s, %s, %s, %s)",
-                            rows
+                            rows, serial_idx=2
                         )
                         if ok:  st.success(f"✅ {ok} equipamento(s) registrado(s) como Disponível.")
                         if dup: st.error(f"🚫 Duplicados ignorados: {', '.join(dup)}")
@@ -446,11 +609,18 @@ if unidade == "Brasil":
                 if di_esc:
                     df_det = query_df("""
                         SELECT serial_china AS "Serial China", serial_brasil AS "Serial Brasil",
-                               modelo AS "Modelo", cliente AS "Cliente",
-                               pedido AS "Pedido", status AS "Status"
+                               modelo AS "Modelo", modelo_original AS "Modelo Original",
+                               cliente AS "Cliente", pedido AS "Pedido", status AS "Status"
                         FROM producao WHERE di=%s ORDER BY modelo, serial_china
                     """, params=(di_esc,))
                     st.markdown(f"**{len(df_det)} balança(s) na DI {di_esc}:**")
+
+                    # Grade dos seriais disponíveis
+                    sn_disp = df_det[df_det['Status']=='Disponível']['Serial China'].tolist()
+                    if sn_disp:
+                        st.markdown(f"**Disponíveis ({len(sn_disp)}):**")
+                        exibir_grade_seriais(sn_disp)
+
                     st.dataframe(df_det.style.map(color_status, subset=['Status']),
                                  use_container_width=True, hide_index=True)
                     st.download_button(f"⬇️ Exportar DI {di_esc}",
@@ -464,6 +634,8 @@ if unidade == "Brasil":
         st.title("🔬 Bancada de Calibração")
 
         lista_clientes = query_df("SELECT nome FROM clientes ORDER BY nome")['nome'].tolist()
+        lista_todos_modelos = query_df("SELECT nome FROM modelos ORDER BY nome")['nome'].tolist()
+
         df_disp = query_df("""
             SELECT id, serial_china AS "Serial_China", modelo AS "Modelo", di AS "DI"
             FROM producao WHERE status='Disponível'
@@ -473,6 +645,7 @@ if unidade == "Brasil":
         if df_disp.empty:
             st.warning("Não há balanças disponíveis no estoque no momento.")
         else:
+            # ── PASSO 1: Selecionar balanças ──
             st.subheader("1️⃣ Selecione as Balanças a Aferir")
 
             dis_disp = ["Todas as DIs"] + sorted(df_disp['DI'].dropna().unique().tolist())
@@ -481,9 +654,9 @@ if unidade == "Brasil":
             df_filtrada = df_disp if filtro_di == "Todas as DIs" else df_disp[df_disp['DI'] == filtro_di]
 
             st.markdown(f"**{len(df_filtrada)} balança(s) disponível(is):**")
-            st.dataframe(df_filtrada[['Serial_China','Modelo','DI']].rename(
-                columns={'Serial_China':'Serial China'}),
-                use_container_width=True, hide_index=True)
+
+            # Grade visual das disponíveis
+            exibir_grade_seriais(df_filtrada['Serial_China'].tolist())
 
             st.markdown("---")
             selecionadas = st.multiselect(
@@ -494,8 +667,34 @@ if unidade == "Brasil":
             if selecionadas:
                 df_sel = df_filtrada[df_filtrada['Serial_China'].isin(selecionadas)].copy()
 
+                # ── PASSO 2: Transformação de modelo ──
                 st.markdown("---")
-                st.subheader("2️⃣ Destino das Balanças")
+                st.subheader("2️⃣ Verificar / Transformar Modelos")
+                st.markdown(
+                    '<div class="info-box">Se alguma balança será aferida com um modelo diferente do importado, selecione o novo modelo abaixo. Deixe em branco para manter o modelo original.</div>',
+                    unsafe_allow_html=True)
+
+                transformacoes = {}
+                for _, row in df_sel.iterrows():
+                    col_sn, col_mod_orig, col_seta, col_mod_novo = st.columns([2, 2, 0.5, 2])
+                    col_sn.markdown(f"**`{row['Serial_China']}`**")
+                    col_mod_orig.markdown(f"Atual: **{row['Modelo']}**")
+                    col_seta.markdown("→")
+                    novo_mod = col_mod_novo.selectbox(
+                        "Novo modelo", ["(manter original)"] + lista_todos_modelos,
+                        index=0, key=f"transf_{row['Serial_China']}")
+                    if novo_mod != "(manter original)":
+                        transformacoes[row['Serial_China']] = novo_mod
+
+                if transformacoes:
+                    st.markdown(f"**{len(transformacoes)} transformação(ões) definida(s):**")
+                    for sn, nm in transformacoes.items():
+                        mod_orig = df_sel[df_sel['Serial_China']==sn]['Modelo'].values[0]
+                        st.markdown(f"- `{sn}`: {mod_orig} → **{nm}**")
+
+                # ── PASSO 3: Destino ──────────
+                st.markdown("---")
+                st.subheader("3️⃣ Destino das Balanças")
                 destino = st.radio("", ["Vincular a Cliente", "Pronta Entrega"],
                                    horizontal=True, label_visibility="collapsed")
 
@@ -513,21 +712,29 @@ if unidade == "Brasil":
                     pedido_sel = cliente_sel = ""
                     status_destino = "Pronta Entrega"
 
+                # ── PASSO 4: Planilha ─────────
                 st.markdown("---")
-                st.subheader("3️⃣ Baixe a Planilha Pré-Preenchida")
+                st.subheader("4️⃣ Baixe a Planilha Pré-Preenchida")
+
+                # Aplica transformações no df para a planilha
+                df_planilha = df_sel.copy()
+                for sn, nm in transformacoes.items():
+                    df_planilha.loc[df_planilha['Serial_China']==sn, 'Modelo'] = nm
+
                 st.markdown(
                     '<div class="info-box">A planilha já vem com <strong>Serial China</strong>, '
-                    '<strong>Modelo</strong> e <strong>DI</strong> preenchidos. '
-                    'Preencha apenas os dados de calibração e o Serial Brasil na bancada.</div>',
+                    '<strong>Modelo</strong> (após transformação) e <strong>DI</strong> preenchidos. '
+                    'Preencha os dados de calibração, o Serial Brasil e o Número do Lacre na bancada.</div>',
                     unsafe_allow_html=True)
                 st.download_button(
                     label=f"⬇️ Baixar Planilha ({len(selecionadas)} balança(s))",
-                    data=gerar_planilha_afericao(df_sel),
+                    data=gerar_planilha_afericao(df_planilha),
                     file_name="Afericao_Bel.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+                # ── PASSO 5: Upload ───────────
                 st.markdown("---")
-                st.subheader("4️⃣ Suba a Planilha Preenchida")
+                st.subheader("5️⃣ Suba a Planilha Preenchida")
                 arquivo = st.file_uploader("Arraste o arquivo Excel preenchido aqui", type=['xlsx'])
 
                 if arquivo:
@@ -539,7 +746,7 @@ if unidade == "Brasil":
                         if destino == "Vincular a Cliente" and (not cliente_sel or not pedido_sel):
                             st.error("⚠️ Informe o Cliente e o Pedido antes de salvar.")
                         elif "Serial_China" not in df_imp.columns:
-                            st.error("⚠️ Use o template gerado no passo 3.")
+                            st.error("⚠️ Use o template gerado no passo 4.")
                         else:
                             conn = get_conn()
                             cur  = conn.cursor()
@@ -548,21 +755,27 @@ if unidade == "Brasil":
                                 sc = str(row["Serial_China"]).strip() if not pd.isna(row.get("Serial_China")) else ""
                                 if not sc: continue
                                 cur.execute(
-                                    "SELECT id FROM producao WHERE serial_china=%s AND status='Disponível'", (sc,))
+                                    "SELECT id, modelo FROM producao WHERE serial_china=%s AND status='Disponível'", (sc,))
                                 check = cur.fetchone()
                                 if check:
+                                    rid, mod_atual = check
                                     def s(col): return "" if pd.isna(row.get(col)) else str(row.get(col)).strip()
+                                    # Modelo final pode ter sido transformado
+                                    mod_final = s("Modelo") or mod_atual
+                                    mod_orig  = mod_atual if mod_final != mod_atual else None
                                     cur.execute('''UPDATE producao SET
                                         cliente=%s, pedido=%s, serial_brasil=%s,
+                                        modelo=%s, modelo_original=%s,
                                         valor_antes=%s, valor_depois=%s,
                                         exc_se=%s, exc_sd=%s, exc_ie=%s, exc_id=%s,
-                                        carga_maxima=%s, zero=%s, status=%s
-                                        WHERE serial_china=%s''',
+                                        carga_maxima=%s, zero=%s, numero_lacre=%s,
+                                        status=%s WHERE serial_china=%s''',
                                         (cliente_sel, pedido_sel, s("Novo_Serial_Brasil"),
+                                         mod_final, mod_orig,
                                          s("Valor_Antes"), s("Valor_Depois"),
                                          s("Exc_Sup_Esq"), s("Exc_Sup_Dir"),
                                          s("Exc_Inf_Esq"), s("Exc_Inf_Dir"),
-                                         s("Carga_Max"), s("Zero"),
+                                         s("Carga_Max"), s("Zero"), s("Numero_Lacre"),
                                          status_destino, sc))
                                     ok += 1
                                 else:
@@ -592,6 +805,8 @@ if unidade == "Brasil":
             st.info("Nenhuma balança em Pronta Entrega no momento.")
         else:
             st.markdown(f"**{len(df_pe)} balança(s) disponível(is) para venda:**")
+            exibir_grade_seriais(
+                [r['Serial Brasil'] or r['Serial China'] for _, r in df_pe.iterrows()])
             st.dataframe(df_pe.drop(columns=['id']), use_container_width=True, hide_index=True)
 
             st.markdown("---")
@@ -634,68 +849,98 @@ if unidade == "Brasil":
         st.title("🔍 Consulta e Inventário Global")
 
         if 'detalhe_id' in st.session_state and st.session_state.detalhe_id:
-            row = query_df("""
-                SELECT serial_china, serial_brasil, di, modelo, cliente, pedido,
-                       valor_antes, valor_depois, exc_se, exc_sd, exc_ie, exc_id,
-                       carga_maxima, zero, status
+            # ── TELA DE DETALHE ───────────────
+            row_df = query_df("""
+                SELECT serial_china, serial_brasil, di, modelo, modelo_original,
+                       cliente, pedido, valor_antes, valor_depois,
+                       exc_se, exc_sd, exc_ie, exc_id,
+                       carga_maxima, zero, numero_lacre, status
                 FROM producao WHERE id=%s
             """, params=(st.session_state.detalhe_id,))
 
-            if not row.empty:
-                r = row.iloc[0]
-                if st.button("← Voltar para a Consulta"):
+            if not row_df.empty:
+                r = row_df.iloc[0].to_dict()
+
+                col_btn, col_pdf = st.columns([1, 1])
+                if col_btn.button("← Voltar para a Consulta"):
                     st.session_state.detalhe_id = None
                     st.rerun()
+
+                # Botão PDF só para balanças finalizadas ou pronta entrega
+                if r['status'] in ('Finalizado', 'Pronta Entrega'):
+                    pdf_bytes = gerar_pdf_relatorio(r)
+                    serial_nome = r.get('serial_brasil') or r.get('serial_china') or 'relatorio'
+                    col_pdf.download_button(
+                        "📄 Baixar Relatório PDF",
+                        data=pdf_bytes,
+                        file_name=f"Relatorio_{serial_nome}.pdf",
+                        mime="application/pdf",
+                        type="primary"
+                    )
 
                 st.markdown("---")
                 st.markdown(f"""
                 <div style="margin-bottom:20px;">
                     <div class="detalhe-label">Serial Brasil (Inmetro)</div>
-                    <div class="detalhe-serial-br">{r.serial_brasil or '—'}</div>
-                    <div class="detalhe-serial-china">🇨🇳 Serial China: <strong>{r.serial_china or '—'}</strong></div>
+                    <div class="detalhe-serial-br">{r.get('serial_brasil') or '—'}</div>
+                    <div class="detalhe-serial-china">🇨🇳 Serial China: <strong>{r.get('serial_china') or '—'}</strong></div>
                 </div>
                 """, unsafe_allow_html=True)
 
                 badge_map = {'Disponível':'badge-disponivel','Pronta Entrega':'badge-pronta','Finalizado':'badge-finalizado'}
-                st.markdown(f'<span class="{badge_map.get(r.status, "badge-disponivel")}">{r.status}</span>',
+                st.markdown(f'<span class="{badge_map.get(r["status"], "badge-disponivel")}">{r["status"]}</span>',
                             unsafe_allow_html=True)
                 st.markdown("---")
 
-                col1, col2, col3 = st.columns(3)
-                col1.markdown(f"**Modelo**\n\n{r.modelo or '—'}")
-                col2.markdown(f"**DI**\n\n{r.di or '—'}")
-                col3.markdown(f"**Cliente**\n\n{r.cliente or '—'}")
-                st.markdown(f"**Pedido:** {r.pedido or '—'}")
+                col1, col2, col3, col4 = st.columns(4)
+                col1.markdown(f"**Modelo Final**\n\n{r.get('modelo') or '—'}")
+                col2.markdown(f"**Modelo Original**\n\n{r.get('modelo_original') or '—' if r.get('modelo_original') else '(sem transformação)'}")
+                col3.markdown(f"**DI**\n\n{r.get('di') or '—'}")
+                col4.markdown(f"**Nº Lacre**\n\n{r.get('numero_lacre') or '—'}")
 
-                if any([r.valor_antes, r.valor_depois, r.exc_se, r.exc_sd, r.exc_ie, r.exc_id, r.carga_maxima, r.zero]):
+                col5, col6 = st.columns(2)
+                col5.markdown(f"**Cliente**\n\n{r.get('cliente') or '—'}")
+                col6.markdown(f"**Pedido**\n\n{r.get('pedido') or '—'}")
+
+                if any([r.get('valor_antes'), r.get('valor_depois'), r.get('exc_se'),
+                        r.get('exc_sd'), r.get('exc_ie'), r.get('exc_id'),
+                        r.get('carga_maxima'), r.get('zero')]):
                     st.markdown("---")
                     st.subheader("📐 Dados de Calibração")
                     c1, c2, c3 = st.columns(3)
-                    c1.metric("Valor Antes", r.valor_antes or "—")
-                    c2.metric("Valor Depois", r.valor_depois or "—")
-                    c3.metric("Carga Máx", r.carga_maxima or "—")
+                    c1.metric("Valor Antes", r.get('valor_antes') or "—")
+                    c2.metric("Valor Depois", r.get('valor_depois') or "—")
+                    c3.metric("Carga Máx", r.get('carga_maxima') or "—")
                     st.markdown("**Excentricidade (4 cantos):**")
                     ce1, ce2, ce3, ce4 = st.columns(4)
-                    ce1.metric("Sup. Esq", r.exc_se or "—")
-                    ce2.metric("Sup. Dir", r.exc_sd or "—")
-                    ce3.metric("Inf. Esq", r.exc_ie or "—")
-                    ce4.metric("Inf. Dir", r.exc_id or "—")
-                    st.metric("Zero", r.zero or "—")
+                    ce1.metric("Sup. Esq", r.get('exc_se') or "—")
+                    ce2.metric("Sup. Dir", r.get('exc_sd') or "—")
+                    ce3.metric("Inf. Esq", r.get('exc_ie') or "—")
+                    ce4.metric("Inf. Dir", r.get('exc_id') or "—")
+                    st.metric("Zero", r.get('zero') or "—")
+
         else:
-            busca = st.text_input("🔎 Buscar por Serial China, Serial Brasil, DI, Pedido ou Cliente:")
+            # ── LISTA ─────────────────────────
+            busca = st.text_input(
+                "🔎 Buscar por Serial China, Serial Brasil, DI, Pedido, Cliente ou Modelo:")
 
             where = ""
             params = None
             if busca:
                 where = """ WHERE di ILIKE %s OR serial_china ILIKE %s
-                             OR serial_brasil ILIKE %s OR cliente ILIKE %s OR pedido ILIKE %s"""
+                             OR serial_brasil ILIKE %s OR cliente ILIKE %s
+                             OR pedido ILIKE %s OR modelo ILIKE %s"""
                 p = f"%{busca}%"
-                params = (p, p, p, p, p)
+                params = (p, p, p, p, p, p)
 
             df = query_df(f"""
-                SELECT id, di AS "DI", modelo AS "Modelo", cliente AS "Cliente",
-                       pedido AS "Pedido", serial_china AS "Serial China",
-                       serial_brasil AS "Serial Brasil", status AS "Status"
+                SELECT id, di AS "DI", modelo AS "Modelo",
+                       modelo_original AS "Modelo Original",
+                       cliente AS "Cliente", pedido AS "Pedido",
+                       serial_china AS "Serial China",
+                       serial_brasil AS "Serial Brasil",
+                       numero_lacre AS "Nº Lacre",
+                       status AS "Status"
                 FROM producao {where} ORDER BY id DESC
             """, params=params)
 
@@ -730,7 +975,6 @@ if unidade == "Brasil":
     # ══════════════════════════════════════════
     elif menu == "⚙️  Configurações":
         st.title("⚙️ Configurações do Sistema")
-
         st.markdown("---")
         st.subheader("⚠️ Zona de Manutenção")
         st.warning("Esta ação apaga **todos os dados** permanentemente e não pode ser desfeita.")
@@ -767,8 +1011,8 @@ else:
     ---
     **Fluxo operacional:**
     1. **Gestão de Cadastros** — Cadastre modelos, clientes e registre a entrada das DIs
-    2. **Bancada de Aferição** — Selecione as balanças, baixe a planilha pré-preenchida, preencha na bancada e importe
+    2. **Bancada de Aferição** — Selecione as balanças, defina transformações, baixe a planilha e importe
     3. **Pronta Entrega** — Vincule clientes às balanças em estoque quando a venda acontecer
-    4. **Consulta** — Pesquise qualquer balança e veja rastreabilidade completa China → Brasil
+    4. **Consulta** — Pesquise qualquer balança, veja o detalhe completo e gere o relatório PDF
     5. **Dashboard** — Acompanhe o status geral do inventário
     """)
